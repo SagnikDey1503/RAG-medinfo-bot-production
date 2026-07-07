@@ -1,13 +1,31 @@
+# Python
 venv/
 .venv/
+backend/.venv/
 .env
-
+backend/.env
 __pycache__/
 *.pyc
 *.pyo
 
+# Built index & traces (regenerate with `python -m rag.ingest`)
+backend/storage/
+
+# Legacy HF FAISS index (superseded by OpenAI index in backend/storage/)
+vectorstore/
+
+# Node / Next.js
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+.env.local
+
+# Editors / OS
 .DS_Store
 .idea/
 .vscode/
-
 *.log
+
+# Personal notes (not for the repo)
+docs/DEEP_DIVE.md

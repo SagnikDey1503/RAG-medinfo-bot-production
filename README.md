@@ -1,77 +1,184 @@
-# MedBot — RAG with Streamlit and FAISS
+# Agentic RAG Assistant
 
-A simple medical Q&A chatbot that reads from a PDF medical encyclopedia and answers your questions using only what it finds in that book. Built with LangChain, FAISS, HuggingFace, and Streamlit.
+A **production-grade Retrieval-Augmented Generation** system over your PDF
+corpus (ships with the Gale Encyclopedia of Medicine). Rebuilt from a basic
+Streamlit + HuggingFace prototype into an agentic pipeline on **OpenAI**, served
+by **FastAPI** with a **Next.js** chatbot.
 
-## What you need in your `.env` file
+Every answer is grounded, cited with numbered footnotes, confidence-scored, and
+comes with a full reasoning trace — and it **says when it isn't sure** rather than
+bluffing.
 
-Create a file called `.env` in the project root with this line:
+> 📖 **Want the full story?** [`docs/DEEP_DIVE.md`](docs/DEEP_DIVE.md) explains how
+> this evolved from the original basic prototype, every technique and *why* it was
+> added, the trade-offs, the bugs fixed along the way, and an interview-style Q&A.
 
 ```
-HF_TOKEN=hf_your_token_here
+                       User Query
+                            │
+                            ▼
+                     Router / Planner ──────► (chit-chat? answer directly)
+                            │
+                            ▼
+     Query Rewriter  (rewrite · multi-query · step-back · HyDE · decompose)
+                            │
+                            ▼
+     Hybrid Retrieval  (BM25 + dense vectors, fused with RRF)
+                            │
+                            ▼
+          Cross-Encoder Re-ranker  (top-k)
+                            │
+                            ▼
+        ┌──── Retrieval Verifier ────┐
+        │  insufficient?             │ sufficient
+   escalate / retry            web-search fallback (CRAG)
+        └────────────┬───────────────┘
+                     ▼
+            Context Compression
+                     ▼
+                 Generator
+                     ▼
+     Answer Verifier + Citation / Hallucination check
+                     ▼
+            Confidence Estimator
+                     ▼
+        Final Response  (+ persisted trace)
 ```
 
-Get a free token from https://huggingface.co/settings/tokens. When creating it, pick **Fine-grained** and tick **"Make calls to Inference Providers"**.
+## What's implemented
 
-## How it works (plain English)
+| # | Component | Where |
+|---|-----------|-------|
+| 1 | **Query rewriter** (context resolution) | `agents/query_rewriter.py` |
+| 2 | **Multi-query** expansion | `agents/query_rewriter.py` |
+| 3 | **HyDE** (hypothetical document embeddings) | `agents/query_rewriter.py` + `retrieval.py` |
+| 4 | **Step-back** prompting | `agents/query_rewriter.py` |
+| 5 | **Router / planner** agent | `agents/router.py` |
+| 6 | **Decomposition** (multi-hop sub-questions) | `agents/query_rewriter.py` |
+| 7 | **Hybrid retrieval** (BM25 + dense) with **RRF** fusion | `retrieval.py`, `vectorstore.py` |
+| 8 | **Cross-encoder re-ranker** (LLM fallback) | `rerank.py` |
+| 9 | **Retrieval verifier** (CRAG evaluator) | `agents/retrieval_verifier.py` |
+| 10 | **Self-healing loop** (retry → escalate → fallback) | `pipeline.py` |
+| 11 | **Web-search fallback** (CRAG, optional Tavily) | `agents/web_search.py` |
+| 12 | **Context compression** | `compress.py` |
+| 13 | **Answer verifier** + **citation / hallucination check** | `agents/answer_verifier.py` |
+| 14 | **Confidence estimator** | `agents/confidence.py` |
+| 15 | **Retrieval trace / audit log** (persisted) | `trace.py` |
 
-Think of this app as a librarian that has read one giant medical book and refuses to talk about anything outside it.
+Cost-optimized models: `gpt-4o-mini` for every agent + generation,
+`text-embedding-3-small` for embeddings. Every component is individually
+toggleable via env vars and **degrades gracefully** — a single agent failure
+never breaks the request.
 
-### Step 1 — Reading the book (`one.py`)
-
-The first script does the one-time prep work:
-
-1. Opens the medical PDF (`data/The_GALE_ENCYCLOPEDIA_of_MEDICINE_SECOND.pdf`).
-2. Cuts it into thousands of small overlapping chunks (a few hundred characters each). Smaller chunks = more precise search later.
-3. For each chunk, asks a small AI model (`all-MiniLM-L6-v2`) to turn the text into a **vector** — basically a list of numbers that captures the meaning of the chunk. Similar meanings = similar numbers.
-4. Saves all those vectors into a **FAISS index** at `vectorstore/db_faiss/`. FAISS is just a very fast "find me the closest vectors" lookup tool.
-
-You only run this once. After that, the index sits on disk ready to be queried.
-
-### Step 2 — Asking questions (`medbot.py`)
-
-This is the Streamlit chat app you actually use:
-
-1. You type a question like *"what is flu"* into the chat box.
-2. Your question gets turned into a vector using the **same** small model.
-3. FAISS finds the **3 most similar chunks** from the book (`k=3`) — these are the chunks most likely to contain the answer.
-4. Those 3 chunks + your question get stuffed into a prompt template that basically says: *"Here are some pieces of a medical book. Using ONLY these, answer the user's question. If the answer isn't here, say you don't know."*
-5. The whole prompt is sent to a chat LLM (`mistralai/Mistral-7B-Instruct-v0.2`) hosted on HuggingFace's inference providers.
-6. The LLM's answer comes back and is displayed in the chat, along with the actual source passages it was based on so you can verify nothing was made up.
-
-This pattern is called **RAG** (Retrieval-Augmented Generation). The "retrieval" part is the FAISS lookup; the "generation" part is the LLM writing the answer. The big win is that the LLM doesn't have to *know* medicine — it just has to *read what we hand it* and summarize, which dramatically reduces hallucinations.
-
-### The other file (`two.py`)
-
-A command-line version of the same Q&A logic, useful for testing without spinning up the web UI.
-
-## Running it
-
-```bash
-# 1. Activate the virtual environment
-source .venv/bin/activate
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Build the FAISS index (only needed once)
-python one.py
-
-# 4. Launch the chat UI
-streamlit run medbot.py
-```
-
-Then open the URL Streamlit prints (usually `http://localhost:8501`).
+**Honest by design:** passages are cited with clean numbered footnotes (`[1]`,
+`[2]`), and if retrieval never verifies as sufficient — even after every
+self-healing retry — the answer is capped at **low** confidence and prefixed with
+an explicit "I couldn't find strong support for this" note instead of a
+confident-but-wrong answer.
 
 ## Project layout
 
 ```
 .
-├── data/                      # the source PDF(s)
-├── vectorstore/db_faiss/      # the built FAISS index (generated by one.py)
-├── one.py                     # builds the FAISS index from the PDF
-├── two.py                     # CLI Q&A
-├── medbot.py                  # Streamlit chat UI
-├── requirements.txt
-├── .env                       # your HF_TOKEN (not committed)
-└── .gitignore
+├── backend/                 # FastAPI + the agentic RAG package
+│   ├── rag/
+│   │   ├── config.py        # all tunables (env-overridable)
+│   │   ├── ingest.py        # PDF → chunks → embeddings → hybrid index
+│   │   ├── vectorstore.py   # FAISS (dense) + BM25 (sparse)
+│   │   ├── retrieval.py     # hybrid retrieval + RRF fusion
+│   │   ├── rerank.py        # cross-encoder reranker
+│   │   ├── compress.py      # contextual compression
+│   │   ├── generate.py      # grounded generation (+ streaming)
+│   │   ├── pipeline.py      # the self-healing orchestrator
+│   │   ├── trace.py         # audit log
+│   │   └── agents/          # router, rewriter, verifiers, web search, confidence
+│   ├── app.py               # FastAPI: /health, /chat, /chat/stream
+│   ├── requirements.txt
+│   └── .env.example
+├── frontend/                # Next.js chatbot (streaming, citations, trace UI)
+├── data/                    # source PDF(s)
+├── docs/DEEP_DIVE.md        # full architecture, rationale, bugs & interview Q&A
+├── legacy/                  # the original Streamlit prototype (v0)
+└── README.md
 ```
+
+## Setup
+
+### 1. Backend
+
+```bash
+cd backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# edit .env and set OPENAI_API_KEY=sk-...
+# (optional) set TAVILY_API_KEY=... to enable the web-search fallback
+```
+
+Build the index (one-time; embeds the PDF with OpenAI — takes a few minutes and
+a few cents for the encyclopedia):
+
+```bash
+python -m rag.ingest
+```
+
+Run the API:
+
+```bash
+uvicorn app:app --reload --port 8000
+```
+
+Check it: `curl http://localhost:8000/health`
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local   # points at http://localhost:8000 by default
+npm run dev
+```
+
+Open **http://localhost:3000**.
+
+## API
+
+`POST /chat`
+
+```json
+{ "message": "What are the symptoms of anemia?", "history": [] }
+```
+
+returns
+
+```json
+{
+  "answer": "Anemia is a deficiency of red blood cells [1]. Symptoms include fatigue [2].",
+  "citations": [
+    { "id": "1", "label": "Gale...pdf (p.320)", "source": "Gale...pdf", "page": 320, "snippet": "...", "origin": "corpus" },
+    { "id": "2", "label": "Gale...pdf (p.321)", "source": "Gale...pdf", "page": 321, "snippet": "...", "origin": "corpus" }
+  ],
+  "confidence": 0.88,
+  "confidence_label": "high",
+  "used_web_search": false,
+  "heal_attempts": 1,
+  "trace_id": "a1b2c3d4e5f6",
+  "trace": [ { "name": "router", ... }, ... ]
+}
+```
+
+Citation `id`s are simple footnote numbers that map 1:1 to the `[n]` markers in
+the answer text.
+
+`POST /chat/stream` streams the same via Server-Sent Events
+(`meta` → `token`* → `done`). Traces are also written to
+`backend/storage/traces/<trace_id>.json`.
+
+## Tuning
+
+Everything in `backend/rag/config.py` is overridable from `.env` — feature
+toggles (`ENABLE_*`), retrieval depth (`FINAL_K`, `VECTOR_K`), self-healing
+(`MAX_HEAL_ATTEMPTS`, `RETRIEVAL_PASS_THRESHOLD`), and models (`LLM_MODEL`,
+`EMBEDDING_MODEL`). To add your own documents, drop PDFs in `data/` and re-run
+`python -m rag.ingest`.
