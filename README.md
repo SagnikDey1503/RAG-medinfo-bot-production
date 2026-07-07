@@ -9,9 +9,6 @@ Every answer is grounded, cited with numbered footnotes, confidence-scored, and
 comes with a full reasoning trace — and it **says when it isn't sure** rather than
 bluffing.
 
-> 📖 **Want the full story?** [`docs/DEEP_DIVE.md`](docs/DEEP_DIVE.md) explains how
-> this evolved from the original basic prototype, every technique and *why* it was
-> added, the trade-offs, the bugs fixed along the way, and an interview-style Q&A.
 
 ```
                        User Query
